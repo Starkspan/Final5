@@ -2,7 +2,6 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const pdf = require('pdf-parse');
 const app = express();
 const port = process.env.PORT || 10000;
@@ -11,51 +10,33 @@ const upload = multer();
 app.use(cors());
 app.use(express.json());
 
-const visionClient = new ImageAnnotatorClient();
-
 app.post('/pdf/analyze', upload.single('pdf'), async (req, res) => {
   try {
     const buffer = req.file.buffer;
     const pdfData = await pdf(buffer);
     const text = pdfData.text;
 
-    // Gewicht erkennen
-    let gewicht = null;
-    const gewichtMatch = text.match(/(\d+[\.,]\d+)\s?kg/i);
-    if (gewichtMatch) {
-      gewicht = parseFloat(gewichtMatch[1].replace(",", "."));
+    // Gewicht erkennen aus z. B. "0.006 kg"
+    const gewichtMatch = text.match(/(\d+[\.,]?\d*)\s?(kg)/i);
+    let gewicht = gewichtMatch ? parseFloat(gewichtMatch[1].replace(",", ".")) : null;
+
+    // Maße mit Ø oder mm gezielt extrahieren
+    const oMatch = text.match(/Ø\s?(\d+[\.,]?\d*)/);
+    const lMatch = text.match(/(\d+[\.,]?\d*)\s?(mm)/i);
+
+    const durchmesser = oMatch ? parseFloat(oMatch[1].replace(",", ".")) : null;
+    const laenge = lMatch ? parseFloat(lMatch[1].replace(",", ".")) : null;
+
+    if (!durchmesser || !laenge) {
+      return res.json({ hinweis: "Maße nicht klar als Ø oder mm erkennbar – bitte manuell prüfen" });
     }
 
-    // Nur Maße mit mm oder Ø auslesen
-    const rawMatches = [...text.matchAll(/(Ø?\d+[\.,]?\d*)\s?(mm)?/gi)];
-    const zahlen = rawMatches
-      .map(m => parseFloat(m[1].replace(",", ".")))
-      .filter(z => z > 0.2 && z <= 1500)
-      .sort((a, b) => b - a);
+    const form = "Zylinder";
+    const x1 = durchmesser;
+    const x2 = laenge;
+    const x3 = 0;
 
-    if (zahlen.length < 2) {
-      return res.json({ hinweis: "Nicht genügend gültige Maße erkannt." });
-    }
-
-    let form = "unbekannt", volumen = 0;
-    let x1 = zahlen[0], x2 = zahlen[1], x3 = zahlen[2] || 10;
-
-    if (text.includes("Ø") || x1 <= 50) {
-      form = "Zylinder";
-      const radius = x1 / 2;
-      volumen = Math.PI * radius * radius * x2 / 1000;
-    } else if (x1 > 3 * x2) {
-      form = "Profil/Rohr";
-      volumen = x2 * x3 * x1 / 1000;
-    } else if (Math.abs(x1 - x2) < 100 && Math.abs(x2 - x3) < 100) {
-      form = "Platte/Klotz";
-      volumen = x1 * x2 * x3 / 1000;
-    } else {
-      form = "Standard";
-      volumen = x1 * x2 * x3 / 1000;
-    }
-
-    // Material aus Text erkennen
+    // Materiallogik
     const textLower = text.toLowerCase();
     let material = 'stahl';
     if (textLower.includes('alu') || textLower.includes('6082')) material = 'aluminium';
@@ -79,10 +60,12 @@ app.post('/pdf/analyze', upload.single('pdf'), async (req, res) => {
     };
 
     if (!gewicht) {
+      const radius = durchmesser / 2;
+      const volumen = Math.PI * radius * radius * laenge / 1000;
       gewicht = volumen * dichten[material];
     }
 
-    if (gewicht > 50 && Math.max(x1, x2, x3) > 100) {
+    if (gewicht > 50 && Math.max(x1, x2) > 100) {
       return res.json({
         form,
         x1, x2, x3,
@@ -119,8 +102,10 @@ app.post('/pdf/analyze', upload.single('pdf'), async (req, res) => {
     res.json({
       form,
       material,
-      x1, x2, x3,
-      gewicht: gewicht.toFixed(2),
+      x1,
+      x2,
+      x3,
+      gewicht: gewicht.toFixed(3),
       laufzeit_min: laufzeit_min.toFixed(1),
       materialkosten: materialkosten.toFixed(2),
       einzelpreis_final: einzelpreis_final.toFixed(2),
